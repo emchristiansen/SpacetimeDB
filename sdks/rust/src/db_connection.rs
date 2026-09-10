@@ -1525,6 +1525,10 @@ mod tests {
         assert_eq!(recv.try_next().unwrap(), Some(7));
     }
 
+    // `crate::Error` is the payload `ParsedMessage::Error` carries, and the
+    // helper is generic over the payload, so this covers the error payload
+    // rather than that variant: `parse_loop` builds the variant, and the
+    // helper never sees which one it was handed.
     #[test]
     fn send_parsed_forwards_an_error_unchanged() {
         let (send, mut recv) = mpsc::unbounded();
