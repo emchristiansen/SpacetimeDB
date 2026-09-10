@@ -41,6 +41,7 @@ use spacetimedb_lib::{bsatn, ser::Serialize, ConnectionId, Identity, Timestamp};
 use spacetimedb_sats::Deserialize;
 #[cfg(not(feature = "browser"))]
 use std::fs::OpenOptions;
+use std::ops::ControlFlow;
 use std::{
     fs::File,
     io::Write,
@@ -1350,8 +1351,25 @@ fn spawn_parse_loop<M: SpacetimeModule>(
     parsed_message_recv
 }
 
+/// Forward one parsed message, reporting whether the loop should continue.
+///
+/// A dropped receiver means the connection is going away, so there is nobody
+/// left to hand the message to. `websocket.rs`'s browser branch treats the same
+/// condition the same way.
+fn send_parsed<T>(send: &mpsc::UnboundedSender<T>, parsed: T) -> ControlFlow<()> {
+    match send.unbounded_send(parsed) {
+        Ok(()) => ControlFlow::Continue(()),
+        Err(_) => {
+            log::warn!("Parsed message receiver dropped.");
+            ControlFlow::Break(())
+        }
+    }
+}
+
 /// A loop which reads raw WS messages from `recv`, parses them into domain types,
 /// and pushes the [`ParsedMessage`]s into `send`.
+///
+/// Ends when either channel closes.
 async fn parse_loop<M: SpacetimeModule>(
     mut recv: mpsc::UnboundedReceiver<ws::v2::ServerMessage>,
     send: mpsc::UnboundedSender<ParsedMessage<M>>,
@@ -1489,8 +1507,40 @@ async fn parse_loop<M: SpacetimeModule>(
         debug_log(&extra_logging, |file| {
             writeln!(file, "`parse_loop`: Parsed as: {parsed:?}")
         });
-        send.unbounded_send(parsed)
-            .expect("Failed to send ParsedMessage to main thread");
+        if send_parsed(&send, parsed).is_break() {
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_parsed_forwards_to_a_live_receiver() {
+        let (send, mut recv) = mpsc::unbounded();
+
+        assert!(send_parsed(&send, 7u32).is_continue());
+        assert_eq!(recv.try_next().unwrap(), Some(7));
+    }
+
+    #[test]
+    fn send_parsed_forwards_an_error_unchanged() {
+        let (send, mut recv) = mpsc::unbounded();
+        let error: crate::Error = InternalError::new("something went wrong").into();
+        let expected = error.to_string();
+
+        assert!(send_parsed(&send, error).is_continue());
+        assert_eq!(recv.try_next().unwrap().map(|e| e.to_string()), Some(expected));
+    }
+
+    #[test]
+    fn send_parsed_breaks_when_the_receiver_is_dropped() {
+        let (send, recv) = mpsc::unbounded::<u32>();
+        drop(recv);
+
+        assert!(send_parsed(&send, 7).is_break());
     }
 }
 
