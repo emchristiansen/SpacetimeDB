@@ -10,6 +10,8 @@ use spacetimedb::{
 };
 use spacetimedb::{log, ProcedureContext};
 
+pub mod environment;
+
 pub type TestAlias = TestA;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,7 +75,7 @@ pub struct TestD {
 
 // uses internal apis that should not be used by user code
 #[allow(dead_code)] // false positive
-const fn get_table_access<Tbl: spacetimedb::Table>(_: impl Fn(&spacetimedb::Local) -> &Tbl + Copy) -> TableAccess {
+const fn get_table_access<Tbl: spacetimedb::Table>(_: impl Fn(&spacetimedb::Local) -> Tbl + Copy) -> TableAccess {
     <Tbl as spacetimedb::table::TableInternal>::TABLE_ACCESS
 }
 
