@@ -5,11 +5,14 @@ use crate::table::IndexAlgo;
 use crate::{sys, AnonymousViewContext, IterBuf, ReducerContext, ReducerResult, SpacetimeType, Table, ViewContext};
 use spacetimedb_lib::bsatn::EncodeError;
 use spacetimedb_lib::db::raw_def::v10::{
-    CaseConversionPolicy, ExplicitNames as RawExplicitNames, RawModuleDefV10Builder,
+    CaseConversionPolicy, ExplicitNames as RawExplicitNames, RawEnvVarTypeV10, RawEnvironmentDeclarationV10,
+    RawModuleDefV10Builder,
 };
 pub use spacetimedb_lib::db::raw_def::v9::Lifecycle as LifecycleReducer;
 use spacetimedb_lib::db::raw_def::v9::{RawIndexAlgorithm, TableType, ViewResultHeader};
-use spacetimedb_lib::de::{self, Deserialize, DeserializeOwned, Error as _, SeqProductAccess};
+#[cfg(any(target_arch = "wasm32", feature = "unstable"))]
+use spacetimedb_lib::de::DeserializeOwned;
+use spacetimedb_lib::de::{self, Deserialize, Error as _, SeqProductAccess};
 use spacetimedb_lib::sats::typespace::TypespaceBuilder;
 use spacetimedb_lib::sats::{impl_deserialize, impl_serialize, ProductTypeElement};
 use spacetimedb_lib::ser::{Serialize, SerializeSeqProduct};
@@ -447,6 +450,19 @@ impl ViewRegistrar<ViewContext> {
     {
         register_view::<A, I, T>(view)
     }
+
+    #[cfg(feature = "test-utils")]
+    #[inline]
+    #[doc(hidden)]
+    pub fn register_for_tests<'a, A, I, T, V>(view: V)
+    where
+        A: Args<'a>,
+        T: ViewReturn,
+        I: FnInfo<Invoke = ViewFn>,
+        V: View<'a, A, T>,
+    {
+        register_view_for_tests::<A, I, T>(view)
+    }
 }
 
 impl ViewRegistrar<AnonymousViewContext> {
@@ -459,6 +475,19 @@ impl ViewRegistrar<AnonymousViewContext> {
         V: AnonymousView<'a, A, T>,
     {
         register_anonymous_view::<A, I, T>(view)
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[inline]
+    #[doc(hidden)]
+    pub fn register_for_tests<'a, A, I, T, V>(view: V)
+    where
+        A: Args<'a>,
+        T: ViewReturn,
+        I: FnInfo<Invoke = AnonymousFn>,
+        V: AnonymousView<'a, A, T>,
+    {
+        register_anonymous_view_for_tests::<A, I, T>(view)
     }
 }
 
@@ -810,6 +839,21 @@ pub fn register_reducer<'a, A: Args<'a>, I: FnInfo<Invoke = ReducerFn>>(_: impl 
     })
 }
 
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+pub fn register_reducer_for_tests<'a, A: Args<'a>, I: FnInfo<Invoke = ReducerFn>>(_: impl Reducer<'a, A>) {
+    register_describer(|module| {
+        let params = A::schema::<I>(&mut module.inner);
+        if let Some(lifecycle) = I::LIFECYCLE {
+            module.inner.add_lifecycle_reducer(lifecycle, I::NAME, params);
+        } else {
+            module.inner.add_reducer(I::NAME, params);
+        }
+
+        module.inner.add_explicit_names(I::explicit_names());
+    })
+}
+
 pub fn register_procedure<'a, A, Ret, I>(_: impl Procedure<'a, A, Ret>)
 where
     A: Args<'a>,
@@ -821,6 +865,23 @@ where
         let ret_ty = <Ret as SpacetimeType>::make_type(&mut module.inner);
         module.inner.add_procedure(I::NAME, params, ret_ty);
         module.procedures.push(I::INVOKE);
+
+        module.inner.add_explicit_names(I::explicit_names());
+    })
+}
+
+#[cfg(all(feature = "test-utils", feature = "unstable"))]
+#[doc(hidden)]
+pub fn register_procedure_for_tests<'a, A, Ret, I>(_: impl Procedure<'a, A, Ret>)
+where
+    A: Args<'a>,
+    Ret: SpacetimeType + Serialize,
+    I: FnInfo<Invoke = ProcedureFn>,
+{
+    register_describer(|module| {
+        let params = A::schema::<I>(&mut module.inner);
+        let ret_ty = <Ret as SpacetimeType>::make_type(&mut module.inner);
+        module.inner.add_procedure(I::NAME, params, ret_ty);
 
         module.inner.add_explicit_names(I::explicit_names());
     })
@@ -845,6 +906,25 @@ where
                 .add_view_primary_key(I::NAME, I::VIEW_PRIMARY_KEY_COLUMNS.iter().copied());
         }
         module.views.push(I::INVOKE);
+
+        module.inner.add_explicit_names(I::explicit_names());
+    })
+}
+
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+pub fn register_view_for_tests<'a, A, I, T>(_: impl View<'a, A, T>)
+where
+    A: Args<'a>,
+    I: FnInfo<Invoke = ViewFn>,
+    T: ViewReturn,
+{
+    register_describer(|module| {
+        let params = A::schema::<I>(&mut module.inner);
+        let return_type = I::return_type(&mut module.inner).unwrap();
+        module
+            .inner
+            .add_view(I::NAME, module.views.len(), true, false, params, return_type);
 
         module.inner.add_explicit_names(I::explicit_names());
     })
@@ -894,6 +974,25 @@ where
     })
 }
 
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+pub fn register_anonymous_view_for_tests<'a, A, I, T>(_: impl AnonymousView<'a, A, T>)
+where
+    A: Args<'a>,
+    I: FnInfo<Invoke = AnonymousFn>,
+    T: ViewReturn,
+{
+    register_describer(|module| {
+        let params = A::schema::<I>(&mut module.inner);
+        let return_type = I::return_type(&mut module.inner).unwrap();
+        module
+            .inner
+            .add_view(I::NAME, module.views_anon.len(), true, true, params, return_type);
+
+        module.inner.add_explicit_names(I::explicit_names());
+    })
+}
+
 /// Registers a row-level security policy.
 pub fn register_row_level_security(sql: &'static str) {
     register_describer(|module| {
@@ -915,6 +1014,88 @@ pub fn register_case_conversion_policy(policy: CaseConversionPolicy) {
     register_describer(move |module| {
         module.inner.set_case_conversion_policy(policy);
     })
+}
+
+/// Implementation support for `#[env]` and `#[derive(EnvironmentValue)]`.
+///
+/// The compiler resolves aliases before selecting metadata and accessors. Custom
+/// implementations must keep their declared constraint and decoding in agreement.
+/// The host independently validates every published string against that constraint.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "environment fields must be `String`, an enum deriving `EnvironmentValue`, or an `Option` of either"
+)]
+pub trait EnvironmentValue: Sized {
+    const OPTIONAL: bool;
+
+    fn constraint() -> RawEnvVarTypeV10;
+
+    /// Decode a checked host result. Errors must identify only the key, never its value.
+    fn from_environment(value: Option<String>, key: &str) -> Self;
+
+    fn get(environment: &crate::Environment, key: &str) -> Self {
+        Self::from_environment(environment.get(key), key)
+    }
+}
+
+/// Required environment types supported by the optional-value implementation.
+/// Derived enums and `String` implement this; `Option<T>` deliberately does not.
+#[doc(hidden)]
+pub trait RequiredEnvironmentValue: EnvironmentValue {}
+
+impl EnvironmentValue for String {
+    const OPTIONAL: bool = false;
+
+    fn constraint() -> RawEnvVarTypeV10 {
+        RawEnvVarTypeV10::String
+    }
+
+    fn from_environment(value: Option<String>, key: &str) -> Self {
+        value.unwrap_or_else(|| panic!("required environment key is missing: {key}"))
+    }
+}
+
+impl RequiredEnvironmentValue for String {}
+
+impl<T: RequiredEnvironmentValue> EnvironmentValue for Option<T> {
+    const OPTIONAL: bool = true;
+
+    fn constraint() -> RawEnvVarTypeV10 {
+        T::constraint()
+    }
+
+    fn from_environment(value: Option<String>, key: &str) -> Self {
+        value.map(|value| T::from_environment(Some(value), key))
+    }
+}
+
+mod string_environment_value_sealed {
+    pub trait Sealed {}
+
+    impl Sealed for String {}
+    impl Sealed for Option<String> {}
+}
+
+/// Legacy field-level string constraints cannot override a typed enum's mapping.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`#[env(values(...))]` requires `String` or `Option<String>`; map enum variants with `#[env(value = \"...\")]` instead"
+)]
+pub trait StringEnvironmentValue: EnvironmentValue + string_environment_value_sealed::Sealed {
+    fn with_constraint(constraint: RawEnvVarTypeV10) -> RawEnvVarTypeV10 {
+        constraint
+    }
+}
+
+impl StringEnvironmentValue for String {}
+impl StringEnvironmentValue for Option<String> {}
+
+/// Register declarative ENV metadata without reading any environment values.
+#[doc(hidden)]
+pub fn register_environment(declarations: fn() -> Vec<RawEnvironmentDeclarationV10>) {
+    register_describer(move |module| {
+        module.inner.add_environment(declarations());
+    });
 }
 
 /// A builder for a module.
@@ -958,6 +1139,16 @@ static VIEWS: OnceLock<Vec<ViewFn>> = OnceLock::new();
 /// An anonymous view function takes in `(AnonymousViewContext, Args)` and returns a Vec of bytes.
 pub type AnonymousFn = fn(AnonymousViewContext, &[u8]) -> Vec<u8>;
 static ANONYMOUS_VIEWS: OnceLock<Vec<AnonymousFn>> = OnceLock::new();
+
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+pub fn module_def_for_tests() -> RawModuleDef {
+    let mut module = ModuleBuilder::default();
+    for describer in &mut *DESCRIBERS.lock().unwrap() {
+        describer(&mut module)
+    }
+    RawModuleDef::V10(module.inner.finish())
+}
 
 /// Called by the host when the module is initialized
 /// to describe the module into a serialized form that is returned.
@@ -1053,7 +1244,7 @@ extern "C" fn __call_reducer__(
 
     // Assemble the `ReducerContext`.
     let timestamp = Timestamp::from_micros_since_unix_epoch(timestamp as i64);
-    let ctx = ReducerContext::new(crate::Local {}, sender, conn_id, timestamp);
+    let ctx = ReducerContext::new(crate::Local::__host(), sender, conn_id, timestamp);
 
     // Fetch reducer function.
     let reducers = REDUCERS.get().unwrap();
@@ -1319,6 +1510,13 @@ pub fn get_jwt(connection_id: ConnectionId) -> Option<String> {
     Some(std::str::from_utf8(&buf).unwrap().to_string())
 }
 
+pub(crate) fn env_get(key: &str) -> Option<String> {
+    let source = sys::env_get(key)?;
+    let mut buf = IterBuf::take();
+    read_bytes_source_into(source, &mut buf);
+    Some(String::from_utf8(buf.to_vec()).expect("host environment values are UTF-8"))
+}
+
 /// Read `source` from the host fully into `buf`.
 pub(crate) fn read_bytes_source_into(source: BytesSource, buf: &mut Vec<u8>) {
     const INVALID: i16 = NO_SUCH_BYTES as i16;
@@ -1401,6 +1599,37 @@ macro_rules! __make_register_reftype {
             extern "C" fn __register_describer() {
                 $crate::rt::register_reftype::<$ty>()
             }
+
+            #[cfg(all(feature = "test-utils", not(target_arch = "wasm32")))]
+            #[used]
+            #[cfg_attr(
+                any(
+                    target_os = "linux",
+                    target_os = "android",
+                    target_os = "freebsd",
+                    target_os = "dragonfly",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                ),
+                unsafe(link_section = ".init_array")
+            )]
+            #[cfg_attr(
+                any(
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "tvos",
+                    target_os = "watchos",
+                    target_os = "visionos",
+                ),
+                unsafe(link_section = "__DATA,__mod_init_func")
+            )]
+            #[cfg_attr(target_os = "windows", unsafe(link_section = ".CRT$XCU"))]
+            static _STDB_TEST_UTILS_INIT: unsafe extern "C" fn() = {
+                unsafe extern "C" fn __stdb_test_utils_register() {
+                    $crate::rt::register_reftype::<$ty>()
+                }
+                __stdb_test_utils_register
+            };
         };
     };
 }
@@ -1421,7 +1650,7 @@ pub fn volatile_nonatomic_schedule_immediate<'de, A: Args<'de>, R: Reducer<'de, 
 ///
 /// Panics if the bytes from `source` fail to deserialize as `T`.
 /// The type name of `T` will be included in the panic message.
-#[cfg_attr(not(feature = "unstable"), allow(unused))]
+#[cfg(any(target_arch = "wasm32", feature = "unstable"))]
 pub(crate) fn read_bytes_source_as<T: DeserializeOwned + 'static>(source: BytesSource) -> T {
     let mut buf = IterBuf::take();
     read_bytes_source_into(source, &mut buf);
