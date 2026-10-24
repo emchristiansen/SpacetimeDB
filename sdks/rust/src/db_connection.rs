@@ -27,7 +27,7 @@ use crate::{
     client_cache::{ClientCache, TableHandle},
     spacetime_module::{AbstractEventContext, AppliedDiff, DbConnection, DbUpdate, InModule, SpacetimeModule},
     subscription::{PendingUnsubscribeResult, SubscriptionHandleImpl, SubscriptionManager},
-    websocket::{WsConnection, WsParams},
+    websocket::{WsConnection, WsError, WsParams},
     Event, ReducerEvent, Status,
 };
 use bytes::Bytes;
@@ -1331,7 +1331,7 @@ enum ParsedMessage<M: SpacetimeModule> {
 
 #[cfg(not(feature = "browser"))]
 fn spawn_parse_loop<M: SpacetimeModule>(
-    raw_message_recv: mpsc::UnboundedReceiver<ws::v2::ServerMessage>,
+    raw_message_recv: mpsc::UnboundedReceiver<Result<ws::v2::ServerMessage, WsError>>,
     handle: &runtime::Handle,
     extra_logging: Option<SharedCell<File>>,
 ) -> (tokio::task::JoinHandle<()>, mpsc::UnboundedReceiver<ParsedMessage<M>>) {
@@ -1342,7 +1342,7 @@ fn spawn_parse_loop<M: SpacetimeModule>(
 
 #[cfg(feature = "browser")]
 fn spawn_parse_loop<M: SpacetimeModule>(
-    raw_message_recv: mpsc::UnboundedReceiver<ws::v2::ServerMessage>,
+    raw_message_recv: mpsc::UnboundedReceiver<Result<ws::v2::ServerMessage, WsError>>,
     extra_logging: Option<SharedCell<File>>,
 ) -> mpsc::UnboundedReceiver<ParsedMessage<M>> {
     let (parsed_message_send, parsed_message_recv) = mpsc::unbounded();
@@ -1353,11 +1353,28 @@ fn spawn_parse_loop<M: SpacetimeModule>(
 /// A loop which reads raw WS messages from `recv`, parses them into domain types,
 /// and pushes the [`ParsedMessage`]s into `send`.
 async fn parse_loop<M: SpacetimeModule>(
-    mut recv: mpsc::UnboundedReceiver<ws::v2::ServerMessage>,
+    mut recv: mpsc::UnboundedReceiver<Result<ws::v2::ServerMessage, WsError>>,
     send: mpsc::UnboundedSender<ParsedMessage<M>>,
     extra_logging: Option<SharedCell<File>>,
 ) {
     while let Some(msg) = recv.next().await {
+        // Muninn fork: the message loop has closed the connection on a message it
+        // could not decode. Report that as this connection's error, so it ends like
+        // any other erroneous disconnect with a distinct `Error` variant, and stop.
+        let msg = match msg {
+            Ok(msg) => msg,
+            Err(source) => {
+                let error = crate::Error::UndecodableMessage {
+                    source: InternalError::new("closing the connection").with_cause(source),
+                };
+                debug_log(&extra_logging, |file| {
+                    writeln!(file, "`parse_loop`: Undecodable raw message: {error:?}")
+                });
+                send.unbounded_send(ParsedMessage::Error(error))
+                    .expect("Failed to send ParsedMessage to main thread");
+                return;
+            }
+        };
         debug_log(&extra_logging, |file| {
             writeln!(file, "`parse_loop`: Got raw message: {msg:?}")
         });

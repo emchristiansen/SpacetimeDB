@@ -25,12 +25,16 @@ browser = [
 ]
 
 [dependencies]
-spacetimedb-data-structures.workspace = true
-spacetimedb-sats.workspace = true
-spacetimedb-lib = { workspace = true, features = ["serde", "metrics_impls"]}
-spacetimedb-client-api-messages.workspace = true
-spacetimedb-metrics.workspace = true
-spacetimedb-query-builder.workspace = true
+# Muninn fork: the SpacetimeDB siblings come from crates.io at exactly the
+# published 2.13.0, as in the published crate's manifest, rather than from this
+# workspace's path dependencies. A consumer patching only `spacetimedb-sdk` to
+# this commit then keeps one copy of each sibling.
+spacetimedb-data-structures = { version = "=2.13.0" }
+spacetimedb-sats = { version = "=2.13.0" }
+spacetimedb-lib = { version = "=2.13.0", default-features = false, features = ["serde", "metrics_impls"] }
+spacetimedb-client-api-messages = { version = "=2.13.0" }
+spacetimedb-metrics = { version = "=2.13.0" }
+spacetimedb-query-builder = { version = "=2.13.0" }
 
 thiserror.workspace = true
 anymap3 = "1.0.1"

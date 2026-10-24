@@ -393,7 +393,7 @@ impl WsConnection {
     #[cfg(not(feature = "browser"))]
     async fn message_loop(
         mut self,
-        incoming_messages: mpsc::UnboundedSender<ws::v2::ServerMessage>,
+        incoming_messages: mpsc::UnboundedSender<Result<ws::v2::ServerMessage, WsError>>,
         outgoing_messages: mpsc::UnboundedReceiver<ws::v2::ClientMessage>,
         extra_logging: Option<Arc<Mutex<File>>>,
     ) {
@@ -460,15 +460,26 @@ impl WsConnection {
                         idle = false;
                         record_metrics(bytes.len());
                         match Self::parse_response(&bytes) {
-                            Err(e) => maybe_log_error!(
-                                &extra_logging,
-                                "Error decoding WebSocketMessage::Binary payload",
-                                Result::<(), _>::Err(e)
-                            ),
+                            // Muninn fork: an undecodable message ends the connection
+                            // instead of being skipped, which would lose it silently.
+                            // The parse loop reports the error as the connection's own.
+                            Err(e) => {
+                                debug_log(&extra_logging, |file| {
+                                    writeln!(file, "Error decoding WebSocketMessage::Binary payload: {e:?}")
+                                });
+                                log::error!("Error decoding WebSocketMessage::Binary payload, closing the connection: {e:?}");
+                                maybe_log_error!(
+                                    &extra_logging,
+                                    "Error sending decoding failure to incoming_messages queue",
+                                    incoming_messages.unbounded_send(Err(e))
+                                );
+                                maybe_log_error!(&extra_logging, "Error sending close frame", SinkExt::close(&mut self.sock).await);
+                                break;
+                            },
                             Ok(msg) => maybe_log_error!(
                                 &extra_logging,
                                 "Error sending decoded message to incoming_messages queue",
-                                incoming_messages.unbounded_send(msg)
+                                incoming_messages.unbounded_send(Ok(msg))
                             ),
                         }
                     }
@@ -543,7 +554,7 @@ impl WsConnection {
         extra_logging: Option<Arc<Mutex<File>>>,
     ) -> (
         JoinHandle<()>,
-        mpsc::UnboundedReceiver<ws::v2::ServerMessage>,
+        mpsc::UnboundedReceiver<Result<ws::v2::ServerMessage, WsError>>,
         mpsc::UnboundedSender<ws::v2::ClientMessage>,
     ) {
         let (outgoing_send, outgoing_recv) = mpsc::unbounded();
@@ -556,7 +567,7 @@ impl WsConnection {
     pub(crate) fn spawn_message_loop(
         self,
     ) -> (
-        mpsc::UnboundedReceiver<ws::v2::ServerMessage>,
+        mpsc::UnboundedReceiver<Result<ws::v2::ServerMessage, WsError>>,
         mpsc::UnboundedSender<ws::v2::ClientMessage>,
     ) {
         let websocket_received = CLIENT_METRICS.websocket_received.with_label_values(&self.db_name);
@@ -569,7 +580,7 @@ impl WsConnection {
         };
 
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded::<ws::v2::ClientMessage>();
-        let (incoming_tx, incoming_rx) = mpsc::unbounded::<ws::v2::ServerMessage>();
+        let (incoming_tx, incoming_rx) = mpsc::unbounded::<Result<ws::v2::ServerMessage, WsError>>();
 
         let (mut ws_writer, ws_reader) = self.sock.split();
 
@@ -590,15 +601,23 @@ impl WsConnection {
                             record_metrics(bytes.len());
                             // parse + forward into `incoming_tx`
                             match Self::parse_response(&bytes) {
-                                Ok(msg) => if let Err(_e) = incoming_tx.unbounded_send(msg) {
+                                Ok(msg) => if let Err(_e) = incoming_tx.unbounded_send(Ok(msg)) {
                                     gloo_console::warn!("Incoming receiver dropped.");
                                     break;
                                 },
+                                // Muninn fork: an undecodable message ends the connection
+                                // instead of being skipped, which would lose it silently.
+                                // The parse loop reports the error as the connection's own.
                                 Err(e) => {
-                                    gloo_console::warn!(
-                                        "Error decoding WebSocketMessage::Binay payload: ",
+                                    gloo_console::error!(
+                                        "Error decoding WebSocketMessage::Binary payload, closing the connection: ",
                                         format!("{:?}", e)
                                     );
+                                    if let Err(_e) = incoming_tx.unbounded_send(Err(e)) {
+                                        gloo_console::warn!("Incoming receiver dropped.");
+                                    }
+                                    let _ = ws_writer.close().await;
+                                    break;
                                 },
                             }
                         },

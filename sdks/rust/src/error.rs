@@ -23,6 +23,18 @@ pub enum Error {
     #[error("Unsubscribe already called on subscription")]
     AlreadyUnsubscribed,
 
+    /// The client received a server message it could not decode, and ended the
+    /// connection rather than skip the message.
+    ///
+    /// Skipping it would lose a whole server message, such as one transaction's
+    /// rows, and leave the client cache silently diverged from the server. The
+    /// `source` carries the decoding error as its cause.
+    #[error("Failed to decode a server WebSocket message: {source}")]
+    UndecodableMessage {
+        #[source]
+        source: InternalError,
+    },
+
     #[error(transparent)]
     Internal(#[from] InternalError),
 }
