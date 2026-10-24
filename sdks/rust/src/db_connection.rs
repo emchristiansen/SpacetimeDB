@@ -1370,8 +1370,11 @@ async fn parse_loop<M: SpacetimeModule>(
                 debug_log(&extra_logging, |file| {
                     writeln!(file, "`parse_loop`: Undecodable raw message: {error:?}")
                 });
-                send.unbounded_send(ParsedMessage::Error(error))
-                    .expect("Failed to send ParsedMessage to main thread");
+                // The connection ends either way. If its owner has already gone,
+                // nobody is left to tell, so a failed send is not a second panic.
+                if send.unbounded_send(ParsedMessage::Error(error)).is_err() {
+                    log::warn!("Undecodable message not reported: the connection's owner is gone");
+                }
                 return;
             }
         };

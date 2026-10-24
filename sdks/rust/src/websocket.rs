@@ -474,6 +474,14 @@ impl WsConnection {
                                     incoming_messages.unbounded_send(Err(e))
                                 );
                                 maybe_log_error!(&extra_logging, "Error sending close frame", SinkExt::close(&mut self.sock).await);
+                                // Keep the outgoing receiver, discarding what arrives, until
+                                // the connection drops its sender in `end_connection`. A client
+                                // message applied before the queued error must not find the
+                                // receiver gone: its send's `expect` would panic before
+                                // `on_disconnect` ran.
+                                if let Some(mut outgoing) = outgoing_messages.take() {
+                                    while outgoing.next().await.is_some() {}
+                                }
                                 break;
                             },
                             Ok(msg) => maybe_log_error!(
@@ -617,6 +625,12 @@ impl WsConnection {
                                         gloo_console::warn!("Incoming receiver dropped.");
                                     }
                                     let _ = ws_writer.close().await;
+                                    // Keep the outgoing receiver, discarding what arrives, until
+                                    // the connection drops its sender in `end_connection`. A client
+                                    // message applied before the queued error must not find the
+                                    // receiver gone: its send's `expect` would panic before
+                                    // `on_disconnect` ran.
+                                    while outgoing.next().await.is_some() {}
                                     break;
                                 },
                             }
